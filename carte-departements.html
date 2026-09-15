@@ -117,6 +117,16 @@
     }
     #loader.hidden { display: none; }
 
+    /* -- Bandeau d'alerte fond de carte -- */
+    #tile-notice {
+      position: absolute; left: 8px; right: 8px; bottom: 8px; z-index: 210;
+      display: none; padding: 6px 10px; border-radius: 6px; font-size: 11px; line-height: 1.4;
+      background: rgba(255,251,235,.96); color: #92400e; border: 1px solid #fcd34d;
+      box-shadow: 0 1px 4px rgba(0,0,0,.12);
+    }
+    #tile-notice.show  { display: block; }
+    #tile-notice.error { background: rgba(254,242,242,.96); color: #991b1b; border-color: #fca5a5; }
+
     /* ── Légende contours ── */
     .legend-line { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--muted); }
     .legend-line .swatch { display: inline-block; width: 14px; height: 0; border-top-width: 2px; border-top-style: solid; }
@@ -161,6 +171,7 @@
   <div id="map-wrap">
     <div id="map"></div>
     <div id="loader">Chargement des contours…</div>
+    <div id="tile-notice"></div>
   </div>
 </div>
 
@@ -217,44 +228,124 @@
   /* ════ LEAFLET ════ */
   const map = L.map('map', { zoomControl: true, preferCanvas: false }).setView([46.6, 2.5], 6);
 
-  // Fournisseurs de tuiles. Chacun expose éventuellement une variante sans toponymes,
-  // utilisée quand les étiquettes permanentes sont actives pour réduire la surcharge visuelle.
+  // Fournisseurs de tuiles. Chaque fond déclare une CHAÎNE de sources équivalentes :
+  // si la première est injoignable (fournisseur indisponible, réseau d'établissement ou
+  // CSP de l'iframe qui la bloque), on bascule automatiquement sur la suivante.
+  // Toutes les sources listées ici sont libres d'accès et ne demandent aucune clé d'API.
   const TILE_PROVIDERS = {
     light: {
-      withLabels: L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-        { attribution: '© OpenStreetMap © CARTO', maxZoom: 19 }),
-      noLabels:   L.tileLayer('https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png',
-        { attribution: '© OpenStreetMap © CARTO', maxZoom: 19 }),
+      label: 'Clair',
+      chain: [
+        { withLabels: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+          noLabels:   'https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png',
+          opts: { attribution: '© OpenStreetMap © CARTO', maxZoom: 19, subdomains: 'abcd' } },
+        { withLabels: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+          noLabels:   null,
+          opts: { attribution: 'Tiles © Esri', maxZoom: 16 } },
+        { withLabels: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+          noLabels:   null,
+          opts: { attribution: '© OpenStreetMap contributors', maxZoom: 19, subdomains: 'abc' } },
+      ],
     },
     dark: {
-      withLabels: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-        { attribution: '© OpenStreetMap © CARTO', maxZoom: 19 }),
-      noLabels:   L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png',
-        { attribution: '© OpenStreetMap © CARTO', maxZoom: 19 }),
+      label: 'Sombre',
+      chain: [
+        { withLabels: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+          noLabels:   'https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png',
+          opts: { attribution: '© OpenStreetMap © CARTO', maxZoom: 19, subdomains: 'abcd' } },
+        { withLabels: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+          noLabels:   null,
+          opts: { attribution: 'Tiles © Esri', maxZoom: 16 } },
+      ],
     },
     osm: {
-      withLabels: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-        { attribution: '© OpenStreetMap contributors', maxZoom: 19, subdomains: 'abc' }),
-      noLabels: null,
+      label: 'OSM',
+      chain: [
+        { withLabels: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+          noLabels:   null,
+          opts: { attribution: '© OpenStreetMap contributors', maxZoom: 19, subdomains: 'abc' } },
+        { withLabels: 'https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png',
+          noLabels:   null,
+          opts: { attribution: '© OpenStreetMap France', maxZoom: 20, subdomains: 'abc' } },
+      ],
     },
     sat: {
-      withLabels: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-        { attribution: 'Tiles © Esri', maxZoom: 19 }),
-      noLabels: null,
+      label: 'Satellite',
+      chain: [
+        { withLabels: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+          noLabels:   null,
+          opts: { attribution: 'Tiles © Esri', maxZoom: 19 } },
+      ],
     },
   };
 
-  let currentTile = TILE_PROVIDERS.light.withLabels.addTo(map);
+  // Rang de la source active dans la chaîne de chaque fond (avance à chaque échec).
+  const tileRank  = { light: 0, dark: 0, osm: 0, sat: 0 };
+  const tileCache = new Map();   // "clé:rang:variante" -> couche Leaflet
+  let currentTile = null;
+
+  const tileNoticeEl = document.getElementById('tile-notice');
+  let tileNoticeTimer = null;
+
+  function showTileNotice(msg, isError) {
+    clearTimeout(tileNoticeTimer);
+    tileNoticeEl.textContent = msg;
+    tileNoticeEl.classList.toggle('error', !!isError);
+    tileNoticeEl.classList.add('show');
+    // Les avertissements de bascule s'effacent seuls ; une panne totale reste affichée.
+    if (!isError) tileNoticeTimer = setTimeout(hideTileNotice, 8000);
+  }
+  function hideTileNotice() {
+    clearTimeout(tileNoticeTimer);
+    tileNoticeEl.classList.remove('show', 'error');
+  }
+
+  // Une couche est déclarée en panne après plusieurs tuiles en erreur sans aucune réussite.
+  const TILE_ERROR_THRESHOLD = 4;
+
+  function watchTileErrors(layer, key, rank) {
+    let errors = 0, healthy = false;
+    layer.on('tileload', () => { healthy = true; if (currentTile === layer) hideTileNotice(); });
+    layer.on('tileerror', () => {
+      if (healthy || currentTile !== layer) return;
+      if (++errors < TILE_ERROR_THRESHOLD) return;
+      const chain = TILE_PROVIDERS[key].chain;
+      if (rank + 1 < chain.length) {
+        tileRank[key] = rank + 1;
+        showTileNotice('Fond « ' + TILE_PROVIDERS[key].label + ' » injoignable : bascule sur une source de secours.');
+        applyTile();
+      } else {
+        showTileNotice('Fond « ' + TILE_PROVIDERS[key].label + ' » injoignable, et aucune source de secours ne reste à essayer. '
+          + 'Les contours et les points restent affichés. Cause probable : accès sortant filtré par le réseau ou par la CSP '
+          + 'de l’iframe — ces fonds sont libres et ne réclament aucune clé d’API.', true);
+      }
+    });
+  }
+
+  function getTileLayer(key, rank, wantNoLabels) {
+    const spec    = TILE_PROVIDERS[key].chain[rank];
+    const variant = (wantNoLabels && spec.noLabels) ? 'noLabels' : 'withLabels';
+    const id      = key + ':' + rank + ':' + variant;
+    let layer = tileCache.get(id);
+    if (!layer) {
+      layer = L.tileLayer(spec[variant], spec.opts);
+      watchTileErrors(layer, key, rank);
+      tileCache.set(id, layer);
+    }
+    return layer;
+  }
 
   function applyTile() {
-    const provider = TILE_PROVIDERS[currentTileKey];
-    const target = (labelMode === 'always' && provider.noLabels) ? provider.noLabels : provider.withLabels;
-    if (currentTile === target) return;
-    map.removeLayer(currentTile);
-    currentTile = target.addTo(map);
+    const target = getTileLayer(currentTileKey, tileRank[currentTileKey], labelMode === 'always');
+    if (currentTile !== target) {
+      if (currentTile) map.removeLayer(currentTile);
+      currentTile = target.addTo(map);
+    }
     // Adapter la couleur des contours selon le fond (clair vs sombre/satellite)
     updateBoundaryStyle();
   }
+
+  applyTile();
 
   function isDarkBackground() {
     return currentTileKey === 'dark' || currentTileKey === 'sat';
