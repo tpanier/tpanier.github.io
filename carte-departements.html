@@ -228,17 +228,28 @@
   /* ════ LEAFLET ════ */
   const map = L.map('map', { zoomControl: true, preferCanvas: false }).setView([46.6, 2.5], 6);
 
+  // CARTO exige désormais une clé d'API pour ses fonds (message
+  // « API Key required » incrusté dans les tuiles). Renseignez la vôtre ici pour les
+  // réactiver : https://carto.com/basemap/apikey . Laissée vide, les sources CARTO
+  // sont simplement écartées au profit des fonds libres ci-dessous.
+  const CARTO_API_KEY = '';
+
   // Fournisseurs de tuiles. Chaque fond déclare une CHAÎNE de sources équivalentes :
   // si la première est injoignable (fournisseur indisponible, réseau d'établissement ou
   // CSP de l'iframe qui la bloque), on bascule automatiquement sur la suivante.
-  // Toutes les sources listées ici sont libres d'accès et ne demandent aucune clé d'API.
-  const TILE_PROVIDERS = {
+  // Les entrées marquées `carto: true` ne sont conservées que si une clé est fournie ;
+  // toutes les autres sont libres d'accès et ne demandent aucune clé.
+  const TILE_SOURCES = {
     light: {
       label: 'Clair',
       chain: [
-        { withLabels: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+        { carto: true,
+          withLabels: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
           noLabels:   'https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png',
           opts: { attribution: '© OpenStreetMap © CARTO', maxZoom: 19, subdomains: 'abcd' } },
+        { withLabels: 'https://data.geopf.fr/wmts?SERVICE=WMTS&VERSION=1.0.0&REQUEST=GetTile&LAYER=GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2&STYLE=normal&TILEMATRIXSET=PM&FORMAT=image/png&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}',
+          noLabels:   null,
+          opts: { attribution: '© IGN — Géoplateforme', maxZoom: 19 } },
         { withLabels: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
           noLabels:   null,
           opts: { attribution: 'Tiles © Esri', maxZoom: 16 } },
@@ -250,7 +261,8 @@
     dark: {
       label: 'Sombre',
       chain: [
-        { withLabels: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+        { carto: true,
+          withLabels: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
           noLabels:   'https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png',
           opts: { attribution: '© OpenStreetMap © CARTO', maxZoom: 19, subdomains: 'abcd' } },
         { withLabels: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
@@ -275,9 +287,29 @@
         { withLabels: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
           noLabels:   null,
           opts: { attribution: 'Tiles © Esri', maxZoom: 19 } },
+        { withLabels: 'https://data.geopf.fr/wmts?SERVICE=WMTS&VERSION=1.0.0&REQUEST=GetTile&LAYER=ORTHOIMAGERY.ORTHOPHOTOS&STYLE=normal&TILEMATRIXSET=PM&FORMAT=image/jpeg&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}',
+          noLabels:   null,
+          opts: { attribution: '© IGN — Géoplateforme', maxZoom: 19 } },
       ],
     },
   };
+
+  // Ajoute la clé CARTO à une URL de tuiles.
+  const withCartoKey = url =>
+    url + (url.includes('?') ? '&' : '?') + 'api_key=' + encodeURIComponent(CARTO_API_KEY);
+
+  // Chaînes effectives : sans clé CARTO, les sources correspondantes sont retirées.
+  const TILE_PROVIDERS = Object.fromEntries(
+    Object.entries(TILE_SOURCES).map(([key, def]) => [key, {
+      label: def.label,
+      chain: def.chain
+        .filter(src => !src.carto || CARTO_API_KEY)
+        .map(src => !src.carto ? src : Object.assign({}, src, {
+          withLabels: withCartoKey(src.withLabels),
+          noLabels:   src.noLabels ? withCartoKey(src.noLabels) : null,
+        })),
+    }])
+  );
 
   // Rang de la source active dans la chaîne de chaque fond (avance à chaque échec).
   const tileRank  = { light: 0, dark: 0, osm: 0, sat: 0 };
