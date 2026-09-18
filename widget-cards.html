@@ -809,15 +809,17 @@ function mdRender(src) {
   // Les fragments déjà transformés sont mis de côté derrière un jeton, pour
   // qu'aucune règle suivante ne les retouche (une URL de lien ne doit pas être
   // ré-autolinkée, un contenu de code ne doit pas être mis en gras…).
-  //     = fragment en ligne,  = fragment de niveau bloc
+  //   <I0> = fragment en ligne, <B0> = fragment de niveau bloc. Le texte ayant
+  //   déjà été échappé, aucun « < » ne peut provenir de la saisie : ces jetons
+  //   sont donc impossibles à contrefaire.
   const slots = [];
-  const stash      = html => ` ${slots.push(html) - 1} `;
-  const stashBlock = html => `${slots.push(html) - 1}`;
+  const stash      = html => `<I${slots.push(html) - 1}>`;
+  const stashBlock = html => `<B${slots.push(html) - 1}>`;
   function unstash(s) {
     let prev, guard = 0;
     do {
       prev = s;
-      s = s.replace(/[ ](\d+)[ ]/g, (m, i) => slots[Number(i)] ?? '');
+      s = s.replace(/<[IB](\d+)>/g, (m, i) => slots[Number(i)] ?? '');
     } while (s !== prev && ++guard < 5);
     return s;
   }
@@ -872,7 +874,7 @@ function mdRender(src) {
     if (!line.trim()) { flushAll(); continue; }
 
     // Bloc de code déjà mis de côté : il occupe sa ligne à lui seul
-    if (/^\d+$/.test(line.trim())) { flushAll(); out.push(line.trim()); continue; }
+    if (/^<B\d+>$/.test(line.trim())) { flushAll(); out.push(line.trim()); continue; }
 
     // Séparateur (--- / *** / ___) — testé avant les listes, que « - » amorce
     if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) { flushAll(); out.push('<hr>'); continue; }
@@ -955,9 +957,33 @@ let refInfoKey = '';     // clé de cache des métadonnées : `${tableId}::${col
 let refLabels  = {};     // rowId → libellé affichable
 
 // Identifiants de ligne contenus dans une valeur de cellule Ref / RefList.
+// Grist livre ces valeurs sous plusieurs formes selon la version et selon que
+// l'encodage est conservé ou non ; on les accepte toutes :
+//   12                      Ref brut
+//   "12"                    Ref sérialisé en chaîne
+//   ["L", 12, 13]           RefList encodée
+//   [12, 13]                RefList décodée
+//   ["R", "Table", 12]      Reference encodée
+//   { tableId, rowId: 12 }  Reference décodée en objet
 function refRowIds(v) {
-  if (typeof v === 'number') return isFinite(v) && v > 0 ? [v] : [];
-  if (Array.isArray(v)) return v.filter(x => typeof x === 'number' && isFinite(x) && x > 0);
+  const num = x => {
+    const n = typeof x === 'number' ? x : (typeof x === 'string' && /^\d+$/.test(x.trim()) ? Number(x) : NaN);
+    return isFinite(n) && n > 0 ? n : null;
+  };
+
+  const one = num(v);
+  if (one) return [one];
+
+  if (Array.isArray(v)) {
+    if (v[0] === 'R') { const n = num(v[2]); return n ? [n] : []; }
+    return v.map(num).filter(Boolean);
+  }
+
+  if (v && typeof v === 'object') {
+    const n = num(v.rowId ?? v.id);
+    return n ? [n] : [];
+  }
+
   return [];
 }
 
@@ -1055,9 +1081,31 @@ function getDescValue(record) {
   if (!config.descCol) return '';
   const v = record[config.descCol];
   if (!refInfo) return v;
-  return refRowIds(v)
-    .map(id => refLabels[id] || `${refInfo.refTableId}[${id}]`)
-    .join(', ');
+
+  const ids = refRowIds(v);
+  if (ids.length) {
+    return ids.map(id => refLabels[id] || `${refInfo.refTableId}[${id}]`).join(', ');
+  }
+
+  // Cellule vide : rien à afficher. Une référence non renseignée vaut 0 côté
+  // Grist, et une liste de références vide vaut [] ou ["L"].
+  if (v == null || v === '' || v === 0 || v === '0') return '';
+  if (Array.isArray(v) && v.filter(x => x !== 'L').length === 0) return '';
+
+  // La colonne est bien une référence mais la valeur n'a pas la forme attendue.
+  // Plutôt que de n'afficher rien, on retombe sur la valeur brute — et on trace
+  // la forme reçue pour pouvoir l'ajouter à refRowIds().
+  warnOnce(`refShape:${config.descCol}`,
+    '[widget-cards] valeur de référence non reconnue dans « ' + config.descCol + ' » :', v);
+  return typeof v === 'object' ? String(v) : v;
+}
+
+// Évite de noyer la console quand le cas se répète sur chaque ligne.
+const warnedKeys = new Set();
+function warnOnce(key, ...args) {
+  if (warnedKeys.has(key)) return;
+  warnedKeys.add(key);
+  console.warn(...args);
 }
 
 // Même valeur, débarrassée de la syntaxe Markdown : sert à l'aperçu des cartes
