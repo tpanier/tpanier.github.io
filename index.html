@@ -147,6 +147,13 @@
       font-size: 0.8rem;
       margin-top: 20px;
     }
+    footer p + p { margin-top: 4px; }
+    footer a {
+      color: var(--accent);
+      text-decoration: none;
+      word-break: break-all;
+    }
+    footer a:hover { text-decoration: underline; }
 
     @media (max-width: 720px) {
       .link-url { max-width: 140px; }
@@ -176,6 +183,11 @@
 
   <footer>
     <p id="base-url"></p>
+    <p>
+      Code source :
+      <a href="https://forge.apps.education.fr/drane-orleans-tours/widget-grist"
+         target="_blank" rel="noopener noreferrer">forge.apps.education.fr/drane-orleans-tours/widget-grist</a>
+    </p>
   </footer>
 </div>
 
@@ -214,7 +226,7 @@ const WIDGETS = [
   {
     name: 'Catalogue / Galerie de fiches',
     file: 'widget-cards.html',
-    desc: 'Affichage ergonomique des lignes Grist sous forme de cartes : titre, description (avec URLs auto-cliquables), image (URL ou pièce jointe), tags. Recherche plein-texte, filtres par tags, vue détail au clic, 4 tailles de cartes (compacte, moyenne, grande, liste).',
+    desc: 'Affichage ergonomique des lignes Grist sous forme de cartes : titre, description, image (URL ou pièce jointe), tags. La description accepte le Markdown (titres, gras/italique, listes, citations, code, liens et images) — option activable dans le panneau ⚙ — et les URLs restent auto-cliquables ; une colonne de type Référence ou Liste de références y est affichée par son libellé. Recherche plein-texte, filtres par tags, vue détail au clic, 4 tailles de cartes (compacte, moyenne, grande, liste).',
   },
   {
     name: 'Tableau de bord KPI',

@@ -290,6 +290,61 @@
       word-break: break-word;
     }
     #modal-desc a:hover { text-decoration: underline; }
+
+    /* Rendu Markdown de la description (classe posée par openModal) */
+    #modal-desc.md { white-space: normal; }
+    #modal-desc.md > *:first-child { margin-top: 0; }
+    #modal-desc.md > *:last-child  { margin-bottom: 0; }
+    #modal-desc.md p { margin: 0 0 10px; }
+    #modal-desc.md h3, #modal-desc.md h4,
+    #modal-desc.md h5, #modal-desc.md h6 {
+      line-height: 1.3;
+      font-weight: 700;
+      margin: 16px 0 6px;
+    }
+    #modal-desc.md h3 { font-size: 1.05rem; }
+    #modal-desc.md h4 { font-size: 0.98rem; }
+    #modal-desc.md h5, #modal-desc.md h6 { font-size: 0.92rem; color: var(--muted); }
+    #modal-desc.md ul, #modal-desc.md ol { margin: 0 0 10px; padding-left: 22px; }
+    #modal-desc.md li { margin-bottom: 3px; }
+    #modal-desc.md blockquote {
+      margin: 0 0 10px;
+      padding: 4px 0 4px 12px;
+      border-left: 3px solid var(--border);
+      color: var(--muted);
+    }
+    #modal-desc.md code {
+      font-family: 'Consolas', monospace;
+      font-size: 0.85em;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 5px;
+    }
+    #modal-desc.md pre {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      margin: 0 0 10px;
+      overflow-x: auto;
+    }
+    #modal-desc.md pre code {
+      background: none; border: none; padding: 0;
+      font-size: 0.82rem;
+    }
+    #modal-desc.md hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 14px 0;
+    }
+    #modal-desc.md img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      margin: 4px 0;
+      display: block;
+    }
     #modal-extra {
       margin-top: 18px;
       padding-top: 14px;
@@ -395,6 +450,32 @@
       border-radius: 3px;
     }
     .col-check:hover { background: var(--surface); }
+    /* Case à cocher dans le panneau : neutralise le style des labels de section */
+    .config-section label.config-check {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.82rem;
+      font-weight: 400;
+      color: var(--text);
+      text-transform: none;
+      letter-spacing: normal;
+      margin-bottom: 0;
+      cursor: pointer;
+    }
+    .config-note {
+      font-size: 0.72rem;
+      color: var(--muted);
+      line-height: 1.45;
+      margin-top: 6px;
+    }
+    .config-note code {
+      font-family: 'Consolas', monospace;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 0 3px;
+    }
     #panel-footer {
       padding: 12px 16px;
       border-top: 1px solid var(--border);
@@ -489,6 +570,20 @@
         <select id="sel-desc-col"><option value="">— aucune —</option></select>
       </div>
       <div class="config-section">
+        <label>Mise en forme de la description</label>
+        <label class="config-check">
+          <input type="checkbox" id="chk-markdown" />
+          Interpréter le Markdown
+        </label>
+        <p class="config-note">
+          Titres <code>#</code>, gras <code>**gras**</code>, italique <code>*italique*</code>,
+          listes <code>-</code> / <code>1.</code>, liens <code>[texte](url)</code>,
+          images <code>![alt](url)</code>, citations <code>&gt;</code>,
+          code <code>`code`</code>, séparateur <code>---</code>.
+          L'aperçu des cartes affiche toujours le texte sans mise en forme.
+        </p>
+      </div>
+      <div class="config-section">
         <label for="sel-image-col">Colonne image (URL ou pièce jointe)</label>
         <select id="sel-image-col"><option value="">— aucune —</option></select>
       </div>
@@ -531,6 +626,7 @@ let config = {
   tagCols: [],
   filterCols: [],
   cardSize: 'medium',
+  markdown: true,   // interpréter la colonne description en Markdown
 };
 const activeFilters = {};   // { col: Set(values) }
 let searchQuery = '';
@@ -668,6 +764,183 @@ async function resolveAttachmentUrls() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// MARKDOWN
+// ═══════════════════════════════════════════════════════════════
+// Sous-ensemble volontairement restreint : titres, gras / italique / barré,
+// code en ligne et blocs ```, listes à puces et numérotées, citations,
+// séparateurs, liens et images. Pas de tableaux, pas de HTML brut, pas de
+// listes imbriquées.
+//
+// SÉCURITÉ — le texte est intégralement échappé AVANT toute transformation.
+// Les seules balises produites le sont par ce module ; aucune balise saisie
+// dans Grist ne peut survivre à l'échappement. Les URL des liens et des images
+// passent par une liste blanche de schémas : une URL en `javascript:` est
+// rendue comme du texte, jamais comme un lien actif.
+
+// Schémas autorisés dans un lien Markdown. Liste blanche volontaire : tout ce
+// qui n'est pas explicitement listé est refusé.
+function mdSafeUrl(url, forImage) {
+  const s = String(url || '').trim();
+  // Un guillemet ou une apostrophe dans une URL est forcément le résultat d'une
+  // saisie tordue (une vraie URL les encode en %22 / %27) : on refuse, plutôt
+  // que de produire un href bancal.
+  if (/&quot|&#39/.test(s)) return null;
+  if (forImage) return /^https?:\/\//i.test(s) ? s : null;
+  return /^(https?:\/\/|mailto:)/i.test(s) ? s : null;
+}
+
+// Emphases. Les gardes `(^|[^\w_])` et `(?!\w)` évitent de couper un mot
+// contenant des underscores (« nom_de_fichier » reste intact).
+function mdEmphasis(s) {
+  return s
+    .replace(/\*\*\*([^\s*][^*]*?)\*\*\*/g, '<strong><em>$1</em></strong>')
+    .replace(/\*\*([^\s*][^*]*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^\w*])\*([^\s*][^*]*?)\*(?!\w)/g, '$1<em>$2</em>')
+    .replace(/(^|[^\w_])__([^\s_][^_]*?)__(?!\w)/g, '$1<strong>$2</strong>')
+    .replace(/(^|[^\w_])_([^\s_][^_]*?)_(?!\w)/g, '$1<em>$2</em>')
+    .replace(/~~([^\s~][^~]*?)~~/g, '<del>$1</del>');
+}
+
+// Markdown → HTML sûr.
+function mdRender(src) {
+  if (src == null || src === '') return '';
+  let text = escapeHtml(String(src).replace(/\r\n?/g, '\n'));
+
+  // Les fragments déjà transformés sont mis de côté derrière un jeton, pour
+  // qu'aucune règle suivante ne les retouche (une URL de lien ne doit pas être
+  // ré-autolinkée, un contenu de code ne doit pas être mis en gras…).
+  //     = fragment en ligne,  = fragment de niveau bloc
+  const slots = [];
+  const stash      = html => ` ${slots.push(html) - 1} `;
+  const stashBlock = html => `${slots.push(html) - 1}`;
+  function unstash(s) {
+    let prev, guard = 0;
+    do {
+      prev = s;
+      s = s.replace(/[ ](\d+)[ ]/g, (m, i) => slots[Number(i)] ?? '');
+    } while (s !== prev && ++guard < 5);
+    return s;
+  }
+
+  // Blocs de code ``` … ``` puis code en ligne ` … `
+  text = text.replace(/```[^\n]*\n([\s\S]*?)```/g,
+    (m, code) => stashBlock(`<pre><code>${code.replace(/\n$/, '')}</code></pre>`));
+  text = text.replace(/`([^`\n]+)`/g, (m, code) => stash(`<code>${code}</code>`));
+
+  function mdInline(s) {
+    // Images ![alt](url "titre")
+    s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;[^)]*&quot;)?\)/g, (m, alt, url) => {
+      const safe = mdSafeUrl(url, true);
+      return safe ? stash(`<img src="${safe}" alt="${alt}" loading="lazy">`) : alt;
+    });
+    // Liens [texte](url "titre") — un schéma refusé retombe sur le libellé seul
+    s = s.replace(/\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;[^)]*&quot;)?\)/g, (m, label, url) => {
+      const safe = mdSafeUrl(url, false);
+      if (!safe) return label;
+      return stash(`<a href="${safe}" target="_blank" rel="noopener noreferrer">${mdEmphasis(label)}</a>`);
+    });
+    // Autolien <https://…> (les chevrons sont échappés en &lt; / &gt;)
+    s = s.replace(/&lt;(https?:\/\/[^\s&]+)&gt;/g,
+      (m, url) => stash(`<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`));
+    // URL nue restante. Un guillemet collé à l'URL a été échappé en amont :
+    // on le retire pour ne pas le faire entrer dans le href.
+    s = s.replace(/(https?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]'"])/g, raw => {
+      const url = raw.replace(/(?:&quot|&#39)$/, '');
+      if (!url) return raw;
+      return stash(`<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`) + raw.slice(url.length);
+    });
+    return mdEmphasis(s);
+  }
+
+  // ── Découpage en blocs, ligne par ligne ──
+  const out = [];
+  let para = [], quote = [], list = null;
+
+  const nl = s => mdInline(s).replace(/\n/g, '<br>');
+  const flushPara  = () => { if (para.length)  { out.push(`<p>${nl(para.join('\n'))}</p>`); para = []; } };
+  const flushQuote = () => { if (quote.length) { out.push(`<blockquote>${nl(quote.join('\n'))}</blockquote>`); quote = []; } };
+  const flushList  = () => {
+    if (!list) return;
+    out.push(`<${list.type}>${list.items.map(i => `<li>${mdInline(i)}</li>`).join('')}</${list.type}>`);
+    list = null;
+  };
+  const flushAll = () => { flushPara(); flushQuote(); flushList(); };
+
+  for (const raw of String(text).split('\n')) {
+    const line = raw.replace(/\s+$/, '');
+
+    if (!line.trim()) { flushAll(); continue; }
+
+    // Bloc de code déjà mis de côté : il occupe sa ligne à lui seul
+    if (/^\d+$/.test(line.trim())) { flushAll(); out.push(line.trim()); continue; }
+
+    // Séparateur (--- / *** / ___) — testé avant les listes, que « - » amorce
+    if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) { flushAll(); out.push('<hr>'); continue; }
+
+    // Titres : # → h3 … pour rester sous le <h2> du titre de la modale
+    const h = /^\s{0,3}(#{1,6})\s+(.*)$/.exec(line);
+    if (h) {
+      flushAll();
+      const lvl = Math.min(6, h[1].length + 2);
+      out.push(`<h${lvl}>${mdInline(h[2].trim())}</h${lvl}>`);
+      continue;
+    }
+
+    // Citations
+    const q = /^\s{0,3}&gt;\s?(.*)$/.exec(line);
+    if (q) { flushPara(); flushList(); quote.push(q[1]); continue; }
+
+    // Listes à puces et numérotées
+    const ul = /^\s*[-*+]\s+(.*)$/.exec(line);
+    const ol = ul ? null : /^\s*\d+[.)]\s+(.*)$/.exec(line);
+    if (ul || ol) {
+      flushPara(); flushQuote();
+      const type = ul ? 'ul' : 'ol';
+      if (!list || list.type !== type) { flushList(); list = { type, items: [] }; }
+      list.items.push((ul || ol)[1].trim());
+      continue;
+    }
+
+    // Suite indentée du dernier point d'une liste
+    if (list && /^\s{2,}\S/.test(raw)) {
+      list.items[list.items.length - 1] += ' ' + line.trim();
+      continue;
+    }
+
+    flushQuote(); flushList();
+    para.push(line);
+  }
+  flushAll();
+
+  return unstash(out.join(''));
+}
+
+// Markdown → texte brut, pour l'aperçu des cartes et la recherche : on retire
+// la syntaxe sans perdre le contenu (« **Paris** » devient « Paris », donc une
+// recherche sur « Paris » trouve bien la fiche). Les valeurs non textuelles
+// (listes de choix…) sont renvoyées telles quelles.
+function mdToPlain(src) {
+  if (typeof src !== 'string' || src === '') return src == null ? '' : src;
+  return src
+    .replace(/\r\n?/g, '\n')
+    .replace(/```[\s\S]*?```/g, ' ')                     // blocs de code
+    .replace(/`([^`\n]+)`/g, '$1')                        // code en ligne
+    .replace(/!\[([^\]]*)\]\([^)\s]*(?:\s+"[^)]*")?\)/g, '$1')   // images → alt
+    .replace(/\[([^\]]*)\]\([^)\s]*(?:\s+"[^)]*")?\)/g, '$1')    // liens → libellé
+    .replace(/^\s{0,3}([-*_])(\s*\1){2,}\s*$/gm, ' ')     // séparateurs
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')                   // titres
+    .replace(/^\s{0,3}&gt;\s?/gm, '')                     // citations (texte déjà échappé)
+    .replace(/^\s{0,3}>\s?/gm, '')                        // citations (texte brut)
+    .replace(/^\s*(?:[-*+]|\d+[.)])\s+/gm, '• ')          // puces
+    .replace(/\*\*\*([^\s*][^*]*?)\*\*\*/g, '$1')
+    .replace(/\*\*([^\s*][^*]*?)\*\*/g, '$1')
+    .replace(/(^|[^\w*])\*([^\s*][^*]*?)\*(?!\w)/g, '$1$2')
+    .replace(/(^|[^\w_])__([^\s_][^_]*?)__(?!\w)/g, '$1$2')
+    .replace(/(^|[^\w_])_([^\s_][^_]*?)_(?!\w)/g, '$1$2')
+    .replace(/~~([^\s~][^~]*?)~~/g, '$1');
+}
+
+// ═══════════════════════════════════════════════════════════════
 // RÉFÉRENCES (Ref / RefList)
 // ═══════════════════════════════════════════════════════════════
 // Grist transmet une référence sous forme d'identifiant de ligne, jamais sous
@@ -787,6 +1060,14 @@ function getDescValue(record) {
     .join(', ');
 }
 
+// Même valeur, débarrassée de la syntaxe Markdown : sert à l'aperçu des cartes
+// et à la recherche plein texte, qui ne doivent pas afficher ni indexer les
+// marqueurs (« **Paris** » se cherche et s'affiche « Paris »).
+function getDescPlain(record) {
+  const v = getDescValue(record);
+  return config.markdown ? mdToPlain(v) : v;
+}
+
 // ═══════════════════════════════════════════════════════════════
 // CONFIG PANEL
 // ═══════════════════════════════════════════════════════════════
@@ -826,6 +1107,7 @@ function populateSelects() {
 
   document.getElementById('inp-title').value = config.title || '';
   document.getElementById('sel-size').value = config.cardSize || 'medium';
+  document.getElementById('chk-markdown').checked = !!config.markdown;
 }
 
 function openPanel() {
@@ -848,6 +1130,7 @@ async function saveConfig() {
     document.querySelectorAll('#filter-cols-grid input[type="checkbox"]:checked')
   ).map(cb => cb.value);
   config.cardSize = document.getElementById('sel-size').value;
+  config.markdown = document.getElementById('chk-markdown').checked;
 
   // Reset des filtres si la config change
   for (const k of Object.keys(activeFilters)) delete activeFilters[k];
@@ -921,7 +1204,7 @@ function recordMatchesSearch(r) {
   if (!searchQuery) return true;
   const haystacks = [];
   if (config.titleCol) haystacks.push(r[config.titleCol]);
-  if (config.descCol)  haystacks.push(getDescValue(r));
+  if (config.descCol)  haystacks.push(getDescPlain(r));
   config.tagCols.forEach(c => haystacks.push(r[c]));
   const text = haystacks.map(v => Array.isArray(v) ? v.join(' ') : String(v ?? '')).join(' ');
   return normalize(text).includes(normalize(searchQuery));
@@ -1004,11 +1287,11 @@ function buildCard(record) {
   title.textContent = String(record[config.titleCol] ?? '').trim() || '(sans titre)';
   body.appendChild(title);
 
-  // Description (preview sans URLs)
+  // Description (preview sans URLs ni syntaxe Markdown)
   if (config.descCol) {
     const desc = document.createElement('p');
     desc.className = 'card-desc';
-    desc.textContent = textPreview(getDescValue(record));
+    desc.textContent = textPreview(getDescPlain(record));
     body.appendChild(desc);
   }
 
@@ -1049,7 +1332,9 @@ function openModal(record) {
   });
 
   const descEl = document.getElementById('modal-desc');
-  descEl.innerHTML = config.descCol ? textToHtml(getDescValue(record)) : '';
+  const descVal = config.descCol ? getDescValue(record) : '';
+  descEl.classList.toggle('md', !!config.markdown);
+  descEl.innerHTML = config.markdown ? mdRender(descVal) : textToHtml(descVal);
 
   // Colonnes supplémentaires (autres que les déjà affichées) en bas
   const shown = new Set([config.titleCol, config.descCol, config.imageCol, ...config.tagCols].filter(Boolean));
