@@ -668,6 +668,126 @@ async function resolveAttachmentUrls() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// RÉFÉRENCES (Ref / RefList)
+// ═══════════════════════════════════════════════════════════════
+// Grist transmet une référence sous forme d'identifiant de ligne, jamais sous
+// forme de libellé : un nombre pour un Ref (0 = vide), un tableau marqué
+// ["L", 12, 13] pour un RefList. Affichée telle quelle, la colonne description
+// montrerait « 12 ». On lit donc les métadonnées du document pour savoir vers
+// quelle table pointe la colonne et quelle colonne sert de « SHOW COLUMN »,
+// puis on construit la correspondance identifiant → libellé.
+
+let refInfo    = null;   // { kind, refTableId, visibleColId } — null si descCol n'est pas une référence
+let refInfoKey = '';     // clé de cache des métadonnées : `${tableId}::${colId}`
+let refLabels  = {};     // rowId → libellé affichable
+
+// Identifiants de ligne contenus dans une valeur de cellule Ref / RefList.
+function refRowIds(v) {
+  if (typeof v === 'number') return isFinite(v) && v > 0 ? [v] : [];
+  if (Array.isArray(v)) return v.filter(x => typeof x === 'number' && isFinite(x) && x > 0);
+  return [];
+}
+
+// Valeur de la « SHOW COLUMN » → texte. Les listes de choix sont aplaties ;
+// les autres types sont convertis tels quels (une colonne de date utilisée
+// comme libellé s'affichera donc sous sa forme brute).
+function refCellToText(v) {
+  if (v == null) return '';
+  if (Array.isArray(v)) return splitTagValue(v).join(', ');
+  return String(v);
+}
+
+// Métadonnées de la colonne `colId` de la table courante. Renvoie null si la
+// colonne n'est pas une référence. Le résultat est mémorisé tant que la table
+// et la colonne ne changent pas.
+async function loadRefInfo(colId) {
+  const tableId = await grist.selectedTable.getTableId();
+  const key = `${tableId}::${colId}`;
+  if (key === refInfoKey) return refInfo;
+
+  const tables = await grist.docApi.fetchTable('_grist_Tables');
+  const cols   = await grist.docApi.fetchTable('_grist_Tables_column');
+
+  let parentId = null;
+  for (let i = 0; i < tables.id.length; i++) {
+    if (tables.tableId[i] === tableId) { parentId = tables.id[i]; break; }
+  }
+  if (parentId == null) { refInfo = null; return null; }
+
+  // Lookup : rowId d'une colonne (dans _grist_Tables_column) → index
+  const colIndexById = {};
+  for (let i = 0; i < cols.id.length; i++) colIndexById[cols.id[i]] = i;
+
+  let info = null;
+  for (let i = 0; i < cols.id.length; i++) {
+    if (cols.parentId[i] !== parentId || cols.colId[i] !== colId) continue;
+    const m = /^(Ref|RefList):(.+)$/.exec(String(cols.type[i] || ''));
+    if (!m) break;
+    // visibleCol = 0 quand aucune colonne d'affichage n'est configurée
+    const visRowId = (cols.visibleCol && cols.visibleCol[i]) || 0;
+    const visIdx   = colIndexById[visRowId];
+    info = {
+      kind:         m[1],
+      refTableId:   m[2],
+      visibleColId: visIdx !== undefined ? cols.colId[visIdx] : null,
+    };
+    break;
+  }
+
+  refInfoKey = key;
+  refInfo = info;
+  return info;
+}
+
+// Construit `refLabels` pour la colonne description. Tolérant à l'échec : en
+// cas d'erreur, on retombe sur l'affichage brut plutôt que de casser le rendu.
+async function resolveRefLabels() {
+  refLabels = {};
+  if (!config.descCol) { refInfo = null; refInfoKey = ''; return; }
+
+  let info = null;
+  try {
+    info = await loadRefInfo(config.descCol);
+  } catch (e) {
+    // Métadonnées non lues : on repart de zéro et on réessaiera au prochain
+    // rendu, plutôt que de garder les infos d'une colonne précédente.
+    refInfo = null;
+    refInfoKey = '';
+    console.warn('[widget-cards] lecture des métadonnées de colonne impossible :', e);
+    return;
+  }
+  if (!info) return;
+
+  try {
+    const tbl  = await grist.docApi.fetchTable(info.refTableId);
+    const ids  = tbl.id || [];
+    const vals = info.visibleColId && Array.isArray(tbl[info.visibleColId])
+      ? tbl[info.visibleColId]
+      : null;
+    for (let i = 0; i < ids.length; i++) {
+      const txt = vals ? refCellToText(vals[i]) : '';
+      // Sans colonne d'affichage (ou si elle est vide), on reprend la notation
+      // de Grist lui-même : Table[rowId].
+      refLabels[ids[i]] = txt || `${info.refTableId}[${ids[i]}]`;
+    }
+  } catch (e) {
+    console.warn(`[widget-cards] lecture de la table référencée « ${info.refTableId} » impossible :`, e);
+  }
+}
+
+// Valeur affichable de la colonne description. Pour une colonne normale, la
+// valeur brute est renvoyée inchangée ; pour un Ref / RefList, les
+// identifiants sont remplacés par les libellés.
+function getDescValue(record) {
+  if (!config.descCol) return '';
+  const v = record[config.descCol];
+  if (!refInfo) return v;
+  return refRowIds(v)
+    .map(id => refLabels[id] || `${refInfo.refTableId}[${id}]`)
+    .join(', ');
+}
+
+// ═══════════════════════════════════════════════════════════════
 // CONFIG PANEL
 // ═══════════════════════════════════════════════════════════════
 function populateSelects() {
@@ -737,8 +857,7 @@ async function saveConfig() {
     await grist.setOption('cardsConfig', JSON.stringify(config));
     msgEl.className = '';
     msgEl.textContent = 'Sauvegardé !';
-    await resolveAttachmentUrls();
-    render();
+    await refreshAndRender();
     setTimeout(() => { msgEl.textContent = ''; closePanel(); }, 600);
   } catch (e) {
     msgEl.className = 'error';
@@ -802,7 +921,7 @@ function recordMatchesSearch(r) {
   if (!searchQuery) return true;
   const haystacks = [];
   if (config.titleCol) haystacks.push(r[config.titleCol]);
-  if (config.descCol)  haystacks.push(r[config.descCol]);
+  if (config.descCol)  haystacks.push(getDescValue(r));
   config.tagCols.forEach(c => haystacks.push(r[c]));
   const text = haystacks.map(v => Array.isArray(v) ? v.join(' ') : String(v ?? '')).join(' ');
   return normalize(text).includes(normalize(searchQuery));
@@ -889,7 +1008,7 @@ function buildCard(record) {
   if (config.descCol) {
     const desc = document.createElement('p');
     desc.className = 'card-desc';
-    desc.textContent = textPreview(record[config.descCol]);
+    desc.textContent = textPreview(getDescValue(record));
     body.appendChild(desc);
   }
 
@@ -930,7 +1049,7 @@ function openModal(record) {
   });
 
   const descEl = document.getElementById('modal-desc');
-  descEl.innerHTML = config.descCol ? textToHtml(record[config.descCol]) : '';
+  descEl.innerHTML = config.descCol ? textToHtml(getDescValue(record)) : '';
 
   // Colonnes supplémentaires (autres que les déjà affichées) en bas
   const shown = new Set([config.titleCol, config.descCol, config.imageCol, ...config.tagCols].filter(Boolean));
@@ -991,17 +1110,25 @@ document.getElementById('btn-clear-filters').addEventListener('click', () => {
 // ═══════════════════════════════════════════════════════════════
 grist.ready({ requiredAccess: 'full' });
 
+// Résout les pièces jointes et les libellés de références avant de redessiner.
+// Les deux résolutions sont tolérantes à l'échec : render() a lieu dans tous
+// les cas, avec ce qui a pu être résolu.
+async function refreshAndRender() {
+  await Promise.all([resolveAttachmentUrls(), resolveRefLabels()]);
+  render();
+}
+
 grist.onOptions(opts => {
   if (opts && opts.cardsConfig) {
     try { Object.assign(config, JSON.parse(opts.cardsConfig)); } catch (e) {}
   }
-  resolveAttachmentUrls().then(render);
+  refreshAndRender();
 });
 
 grist.onRecords(records => {
   if (!records) return;
   allRecords = records;
-  resolveAttachmentUrls().then(render);
+  refreshAndRender();
 });
 </script>
 </body>
