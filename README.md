@@ -1,3 +1,5 @@
+Cloned from https://forge.apps.education.fr/drane-orleans-tours/widget-grist.git
+
 # Widget-Grist
 
 Collection de widgets personnalisés pour [Grist](https://www.getgrist.com/), développée par la DRANE d'Orléans-Tours. Chaque widget est un fichier HTML autonome à coller comme « Widget personnalisé » dans Grist (URL).
