@@ -1520,7 +1520,7 @@ function renderForm() {
       el('div', { class: 'form-progress-bar-fill', id: 'form-progress-fill' }),
     ]),
   ]);
-  form.appendChild(progress);
+  //form.appendChild(progress);
 
   const blocks = Array.isArray(state.textBlocks) ? state.textBlocks : [];
   const blocksAt = (pos) => blocks.filter(b => b && b.position === pos);
