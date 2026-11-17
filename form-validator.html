@@ -826,11 +826,6 @@ const state = {
   // Affichage des sections « avancées » dans le panneau ⚙
   showValidationFields:  false,  // règles de validation (format / regex / min / max / longueur / message)
   showConditionalFields: false,  // logique conditionnelle (showIf)
-  // Apparence du formulaire lui-même (vaut dans Grist comme en lien public).
-  // Formulé en « masquer » et non en « afficher » pour rester compatible avec
-  // les configurations et les liens publics antérieurs : clé absente = falsy =
-  // barre affichée, soit le comportement historique.
-  hideProgress: false,
   validationColumnName: 'Validation',
   // Mode public / standalone (formulaire ouvert hors de Grist)
   server:    null,        // ex. "https://grist.exemple.fr"
@@ -953,11 +948,7 @@ async function loadRefOptions(targetTableId, visibleColId, filterExpr) {
     const tbl = await grist.docApi.fetchTable(targetTableId);
     const ids = tbl.id || [];
     const displayArr = visibleColId && Array.isArray(tbl[visibleColId]) ? tbl[visibleColId] : null;
-    const allPreds = parseRefFilter(filterExpr);
-    const predicates = allPreds.filter(p => !(p.value && p.value.formRef));
-    // Colonnes lues par les clauses en cascade : seules celles-ci sont conservées
-    // (et donc transmises dans le lien public).
-    const cascadeCols = [...new Set(allPreds.filter(p => p.value && p.value.formRef).map(p => p.colName))];
+    const predicates = parseRefFilter(filterExpr);
     const out = [];
     for (let i = 0; i < ids.length; i++) {
       if (predicates.length && !predicates.every(p => evalRefPredicate(tbl, i, p))) continue;
@@ -966,12 +957,7 @@ async function loadRefOptions(targetTableId, visibleColId, filterExpr) {
       if (v == null) display = String(ids[i]);
       else if (Array.isArray(v)) display = v.slice(v[0] === 'L' ? 1 : 0).join(', ');
       else display = String(v);
-      const opt = { id: ids[i], display };
-      if (cascadeCols.length) {
-        opt.raw = {};
-        for (const k of cascadeCols) if (tbl[k]) opt.raw[k] = tbl[k][i];
-      }
-      out.push(opt);
+      out.push({ id: ids[i], display });
     }
     out.sort((a, b) =>
       a.display.localeCompare(b.display, undefined, { numeric: true, sensitivity: 'base' }));
@@ -1003,8 +989,8 @@ function parseFilterClause(line, namespace) {
   // Accepte deux formes :
   //   <namespace>.colName <op> <valeur>
   //   fn(<namespace>.colName) <op> <valeur>
-  const reFn   = new RegExp(`^(\\w+)\\(\\s*${namespace}\\.([A-Za-z_][A-Za-z0-9_]*)\\s*\\)\\s*(==|!=|<=|>=|<|>)\\s*(.+)Beware, uBlock Origin blocked a potential ClickFix attack: );
-  const reBare = new RegExp(`^${namespace}\\.([A-Za-z_][A-Za-z0-9_]*)\\s*(==|!=|<=|>=|<|>)\\s*(.+)Beware, uBlock Origin blocked a potential ClickFix attack: );
+  const reFn   = new RegExp(`^(\\w+)\\(\\s*${namespace}\\.([A-Za-z_][A-Za-z0-9_]*)\\s*\\)\\s*(==|!=|<=|>=|<|>)\\s*(.+)$`);
+  const reBare = new RegExp(`^${namespace}\\.([A-Za-z_][A-Za-z0-9_]*)\\s*(==|!=|<=|>=|<|>)\\s*(.+)$`);
   let fn = null, colName, op, rawValue;
   let m = reFn.exec(line);
   if (m) { [, fn, colName, op, rawValue] = m; }
@@ -1018,12 +1004,8 @@ function parseFilterClause(line, namespace) {
     if (!FILTER_FUNCS[fn]) return { _error: `fonction inconnue : ${fn}` };
   }
   let value;
-  const formRef = namespace === 'choice' && /^form\.([A-Za-z_][A-Za-z0-9_]*)$/.exec(rawValue.trim());
-  if (formRef) value = { formRef: formRef[1] };
-  else {
-    try { value = parseFilterLiteral(rawValue.trim()); }
-    catch (e) { return { _error: 'littéral invalide : ' + rawValue }; }
-  }
+  try { value = parseFilterLiteral(rawValue.trim()); }
+  catch (e) { return { _error: 'littéral invalide : ' + rawValue }; }
   return { fn, colName, op, value };
 }
 
@@ -1148,159 +1130,11 @@ function getFormValuesForConditions() {
   return values;
 }
 
-// Filtrage en cascade : refFilter contenant `choice.<col> <op> form.<champ>`.
-// Renvoie true si une sélection existante a été effacée (→ nouvelle passe).
-function isEmptyFormValue(v) {
-  return v == null || v === '' || (Array.isArray(v) && v.length === 0);
-}
-
-// Clauses du refFilter, mémoïsées : applyCascadeFilters est rejoué à chaque
-// passe de applyConditions, elle-même rappelée à chaque frappe.
-const refFilterCache = new Map();
-function parsedRefFilter(expr) {
-  if (!refFilterCache.has(expr)) refFilterCache.set(expr, parseRefFilter(expr));
-  return refFilterCache.get(expr);
-}
-
-// Avertissements de configuration : une fois par anomalie, pas par ligne.
-const cascadeWarned = new Set();
-function warnCascadeOnce(key, ...args) {
-  if (cascadeWarned.has(key)) return;
-  cascadeWarned.add(key);
-  console.warn(...args);
-}
-
-// `clearedCols` collecte les colId dont une valeur a été retirée, pour que
-// applyConditions rafraîchisse leur ✓/✗ une fois la boucle stabilisée.
-function applyCascadeFilters(values, clearedCols) {
-  let cleared = false;
-  for (const col of state.columns) {
-    const ovr = state.validators[col.colId] || {};
-    if (!ovr.refFilter || !Array.isArray(col.refOptions)) continue;
-
-    const preds = parsedRefFilter(ovr.refFilter).filter(p => {
-      if (!(p.value && p.value.formRef)) return false;
-      // Un champ parent inexistant est une erreur de configuration : on ignore
-      // la clause en le signalant, plutôt que de vider la liste en laissant
-      // croire à une absence de données.
-      if (!state.columns.some(c => c.colId === p.value.formRef)) {
-        warnCascadeOnce(`${col.colId}:${p.value.formRef}`,
-          `[form-validator] filtre de « ${col.colId} » : le champ `
-          + `« form.${p.value.formRef} » n'existe pas dans ce formulaire, clause ignorée.`);
-        return false;
-      }
-      return true;
-    });
-    if (!preds.length) continue;
-
-    const fieldEl = document.querySelector(`.field[data-col="${CSS.escape(col.colId)}"]`);
-    if (!fieldEl) continue;
-
-    // Première clause dont le parent n'est pas renseigné : c'est celle-là qu'il
-    // faut nommer dans le message, pas forcément la première du filtre.
-    const waiting = preds.find(p => isEmptyFormValue(values[p.value.formRef]));
-    const allowed = new Set();
-    if (!waiting) {
-      for (const o of col.refOptions) {
-        const row = {};
-        for (const k of Object.keys(o.raw || {})) row[k] = [o.raw[k]];
-        const ok = preds.every(p => {
-          const fv = values[p.value.formRef];
-          const candidates = Array.isArray(fv) ? fv : [fv];
-          // Une négation doit valoir pour TOUTES les valeurs du parent :
-          // « différent de 45 ou différent de 37 » serait vrai de presque tout.
-          return p.op === '!='
-            ? candidates.every(c => evalRefPredicate(row, 0, { ...p, value: c }))
-            : candidates.some(c  => evalRefPredicate(row, 0, { ...p, value: c }));
-        });
-        if (ok) allowed.add(String(o.id));
-      }
-    }
-
-    let msg = null;
-    if (allowed.size === 0) {
-      if (waiting) {
-        const parent = state.columns.find(c => c.colId === waiting.value.formRef);
-        msg = `Choisissez d'abord « ${(parent && (parent.label || parent.colId)) || waiting.value.formRef} »`;
-      } else {
-        msg = 'Aucune valeur disponible';
-      }
-    }
-    if (setFieldAllowed(fieldEl, allowed, msg)) {
-      cleared = true;
-      if (clearedCols) clearedCols.add(col.colId);
-    }
-  }
-  return cleared;
-}
-
-// Restreint les options d'un champ Ref/RefList aux ids autorisés.
-// Le rendu est détecté par structure (cf. readField). N'émet aucun événement.
-function setFieldAllowed(fieldEl, allowed, emptyMsg) {
-  let cleared = false;
-  const ok = (v) => allowed.has(String(v));
-  const chipGroup = fieldEl.querySelector('.chip-group');
-  const optGroup  = fieldEl.querySelector('.field-options-group');
-  const acRoot    = fieldEl.querySelector('.field-ac');
-  const sel       = fieldEl.querySelector('select');
-  const ctrl      = chipGroup || optGroup || acRoot || sel;
-  if (!ctrl) return false;
-
-  if (chipGroup) {
-    chipGroup.querySelectorAll('.chip').forEach(chip => {
-      const show = ok(chip.dataset.val);
-      chip.style.display = show ? '' : 'none';
-      if (!show && chip.classList.contains('selected')) {
-        chip.classList.remove('selected');
-        chip.setAttribute('aria-pressed', 'false');
-        cleared = true;
-      }
-    });
-  } else if (optGroup) {
-    optGroup.querySelectorAll('.field-option').forEach(optEl => {
-      const inp = optEl.querySelector('input');
-      const show = inp && ok(inp.value);
-      optEl.style.display = show ? '' : 'none';
-      if (!show && inp && inp.checked) { inp.checked = false; cleared = true; }
-    });
-  } else if (acRoot) {
-    if (typeof acRoot._setAllowed === 'function' && acRoot._setAllowed(allowed)) cleared = true;
-  } else if (sel) {
-    Array.from(sel.options).forEach(o => {
-      if (o.value === '') return;
-      const show = ok(o.value);
-      o.hidden = o.disabled = !show;
-      if (!show && o.selected) { o.selected = false; cleared = true; }
-    });
-    // Sur un select simple, désélectionner laisse selectedIndex à -1 et
-    // l'affichage vide : on ramène explicitement le « — sélectionner — ».
-    if (cleared && !sel.multiple) sel.value = '';
-  }
-
-  // Message explicatif quand aucune option n'est proposée
-  let msgEl = fieldEl.querySelector('.cascade-msg');
-  if (emptyMsg) {
-    if (!msgEl) {
-      msgEl = el('div', { class: 'field-options-empty cascade-msg' });
-      ctrl.insertAdjacentElement('afterend', msgEl);
-    }
-    msgEl.textContent = emptyMsg;
-  } else if (msgEl) {
-    msgEl.remove();
-  }
-  return cleared;
-}
-
 function applyConditions() {
-  const clearedCols = new Set();
-
   // Itère jusqu'à stabilité pour gérer les dépendances en cascade.
   for (let pass = 0; pass < 10; pass++) {
     let changed = false;
     const values = getFormValuesForConditions();
-    // Un effacement doit relancer une passe (A → B → C), sans émettre de `change`.
-    if (applyCascadeFilters(values, clearedCols)) changed = true;
-
     for (const col of state.columns) {
       const ovr = state.validators[col.colId] || {};
       const expr = ovr.showIf && String(ovr.showIf).trim();
@@ -1323,15 +1157,6 @@ function applyConditions() {
       }
     }
     if (!changed) break;
-  }
-
-  // Un champ vidé par la cascade ne doit pas conserver son ✓ vert. On ne passe
-  // pas par un événement `change` : le formulaire l'écoute pour rappeler
-  // applyConditions, ce qui provoquerait une récursion.
-  for (const colId of clearedCols) {
-    const col = state.columns.find(c => c.colId === colId);
-    const fieldEl = document.querySelector(`.field[data-col="${CSS.escape(colId)}"]`);
-    if (col && fieldEl && fieldEl.dataset.touched === '1') revalidateField(col, fieldEl);
   }
 }
 
@@ -1685,20 +1510,17 @@ function renderForm() {
   const card = el('div', { class: 'form-card' });
   const form = el('form', { id: 'form', autocomplete: 'off' });
 
-  // Barre de progression (champs renseignés / total visibles).
-  // Quand elle est masquée, on ne crée pas l'élément : updateProgress() ne
-  // trouve alors plus #form-progress et se termine immédiatement.
-  if (!state.hideProgress) {
-    form.appendChild(el('div', { class: 'form-progress', id: 'form-progress' }, [
-      el('div', { class: 'form-progress-text' }, [
-        el('span', { id: 'form-progress-label' }, '0 / 0 champs renseignés'),
-        el('span', { id: 'form-progress-percent' }, '0%'),
-      ]),
-      el('div', { class: 'form-progress-bar' }, [
-        el('div', { class: 'form-progress-bar-fill', id: 'form-progress-fill' }),
-      ]),
-    ]));
-  }
+  // Barre de progression (champs renseignés / total visibles)
+  const progress = el('div', { class: 'form-progress', id: 'form-progress' }, [
+    el('div', { class: 'form-progress-text' }, [
+      el('span', { id: 'form-progress-label' }, '0 / 0 champs renseignés'),
+      el('span', { id: 'form-progress-percent' }, '0%'),
+    ]),
+    el('div', { class: 'form-progress-bar' }, [
+      el('div', { class: 'form-progress-bar-fill', id: 'form-progress-fill' }),
+    ]),
+  ]);
+  //form.appendChild(progress);
 
   const blocks = Array.isArray(state.textBlocks) ? state.textBlocks : [];
   const blocksAt = (pos) => blocks.filter(b => b && b.position === pos);
@@ -1981,7 +1803,6 @@ function buildAutocomplete(col, fid, isMulti, options) {
   wrap.appendChild(list);
 
   const selectedIds = [];  // pour le mode multi (ordre préservé)
-  let allowed = null;      // Set d'ids autorisés (filtrage en cascade) ou null
   let activeIdx = -1;
 
   function renderChips() {
@@ -2026,13 +1847,12 @@ function buildAutocomplete(col, fid, isMulti, options) {
   function updateList() {
     const q = txt.value.toLowerCase().trim();
     const filtered = options.filter(o => {
-      if (allowed && !allowed.has(o.value)) return false;
       if (isMulti && selectedIds.includes(o.value)) return false;
       if (!q) return true;
       return o.label.toLowerCase().includes(q);
     });
     list.innerHTML = '';
-    if (options.length === 0 || (allowed && allowed.size === 0)) {
+    if (options.length === 0) {
       list.style.display = 'none';
       return;
     }
@@ -2098,8 +1918,7 @@ function buildAutocomplete(col, fid, isMulti, options) {
   txt.addEventListener('blur', () => {
     setTimeout(() => { list.style.display = 'none'; }, 150);
     if (!isMulti && hidden) {
-      const direct = options.find(o => (!allowed || allowed.has(o.value))
-        && o.label.toLowerCase() === txt.value.toLowerCase());
+      const direct = options.find(o => o.label.toLowerCase() === txt.value.toLowerCase());
       if (direct) {
         txt.value = direct.label;
         hidden.value = direct.value;
@@ -2113,26 +1932,6 @@ function buildAutocomplete(col, fid, isMulti, options) {
       }
     }
   });
-
-  // Filtrage en cascade : renvoie true si une sélection a été effacée
-  wrap._setAllowed = (set) => {
-    allowed = set;
-    let cleared = false;
-    if (isMulti) {
-      const keep = selectedIds.filter(id => set.has(id));
-      if (keep.length !== selectedIds.length) {
-        selectedIds.length = 0;
-        selectedIds.push(...keep);
-        renderChips();
-        cleared = true;
-      }
-    } else if (hidden && hidden.value && !set.has(hidden.value)) {
-      hidden.value = '';
-      txt.value = '';
-      cleared = true;
-    }
-    return cleared;
-  };
 
   // Reset propre quand le formulaire est réinitialisé
   wrap._reset = () => {
@@ -2475,31 +2274,12 @@ function renderFeatureToggles(body) {
   body.appendChild(wrap);
 }
 
-// Réglages portant sur le formulaire vu par le saisisseur, et non sur le
-// panneau. Pris en compte à l'enregistrement, comme le titre du formulaire.
-function renderFormAppearance(body) {
-  const wrap = el('div', { class: 'feature-toggles' });
-  wrap.appendChild(el('div', { class: 'feature-toggles-title' },
-    'Apparence du formulaire'));
-
-  const progCb = el('input', { type: 'checkbox', id: 'tog-hide-progress' });
-  progCb.checked = !!state.hideProgress;
-  const progLbl = el('label', { for: 'tog-hide-progress' }, [
-    'Masquer la barre de progression',
-    el('em', {}, '« X / Y champs renseignés » affiché en tête du formulaire'),
-  ]);
-  wrap.appendChild(el('div', { class: 'feature-toggle' }, [progCb, progLbl]));
-
-  body.appendChild(wrap);
-}
-
 function renderConfigPanel() {
   const body = $('#config-body');
   body.innerHTML = '';
 
   // Bandeau de préférences en tête (affichage des sections avancées)
   renderFeatureToggles(body);
-  renderFormAppearance(body);
 
   if (state.columns.length === 0) {
     body.appendChild(el('p', { class: 'hint' }, "Aucune colonne à configurer."));
@@ -2615,12 +2395,7 @@ function renderConfigPanel() {
             "Syntaxe : choice.<colonne> <op> <valeur> — ou fn(choice.<colonne>) <op> <valeur>. " +
             "Opérateurs : == != < <= > >=. Fonctions : len, lower, upper, trim. " +
             "Valeurs : 'texte', \"texte\", nombre, true / false / null. " +
-            "Une condition par ligne (ET logique). Ligne commençant par # = commentaire. " +
-            "Cascade : à la place d'une valeur, écrivez form.<champ> pour filtrer selon la réponse donnée à un " +
-            "autre champ du formulaire (ex. choice.Departement == form.Departement). Tous les opérateurs sont " +
-            "acceptés. Si le champ parent admet plusieurs valeurs, == retient une option dès qu'une valeur est " +
-            "commune, et != exige qu'elle diffère de toutes. " +
-            "Attention : la colonne citée en cascade est transmise dans le lien public."),
+            "Une condition par ligne (ET logique). Ligne commençant par # = commentaire."),
         ]),
       ]));
     }
@@ -2651,7 +2426,7 @@ function renderConfigPanel() {
         card.appendChild(el('div', { class: 'row' }, [
           el('div', { class: 'full' }, [
             el('label', {}, 'Regex personnalisée (priorité sur le format)'),
-            el('input', { type: 'text', 'data-k': 'regex', value: ovr.regex || '', placeholder: 'ex. ^[A-Z]{2}\\d{4} }),
+            el('input', { type: 'text', 'data-k': 'regex', value: ovr.regex || '', placeholder: 'ex. ^[A-Z]{2}\\d{4}$' }),
           ]),
         ]));
 
@@ -3030,8 +2805,6 @@ async function onGeneratePublicLink(ev) {
   state.standaloneTitle   = (document.getElementById('standalone-title').value   || 'Formulaire').trim();
   state.standaloneSuccess = (document.getElementById('standalone-success').value || 'Merci, votre réponse a été enregistrée.').trim();
   const docUrl            = (document.getElementById('standalone-doc-url').value || '').trim();
-  const hideProgCb        = document.getElementById('tog-hide-progress');
-  if (hideProgCb) state.hideProgress = hideProgCb.checked;
 
   if (!docUrl) {
     showToast("Renseignez l'URL du document Grist", 'err');
@@ -3052,7 +2825,6 @@ async function onGeneratePublicLink(ev) {
     await grist.setOption('standaloneTitle',   state.standaloneTitle);
     await grist.setOption('standaloneSuccess', state.standaloneSuccess);
     await grist.setOption('docUrl',            state.docUrl);
-    await grist.setOption('hideProgress',      !!state.hideProgress);
   } catch (e) { console.warn('[form-validator] setOption :', e); }
 
   // Recharge le schéma pour que refOptions reflète d'éventuels nouveaux filtres
@@ -3063,9 +2835,6 @@ async function onGeneratePublicLink(ev) {
     successMessage: state.standaloneSuccess,
     docUrl:         state.docUrl,
     tableId:        state.tableId,
-    // Omise quand elle vaut false, pour ne pas allonger le lien inutilement :
-    // son absence est de toute façon interprétée comme « barre affichée ».
-    ...(state.hideProgress ? { hideProgress: true } : {}),
     columns: state.columns.map(c => ({
       colId: c.colId, label: c.label, type: c.type,
       choices: c.choices, refOptions: c.refOptions,
@@ -3176,9 +2945,6 @@ async function saveConfig() {
   if (successInput) state.standaloneSuccess = (successInput.value || 'Merci, votre réponse a été enregistrée.').trim();
   if (docUrlInput)  state.docUrl            = (docUrlInput.value  || '').trim() || null;
 
-  const hideProgCb = document.getElementById('tog-hide-progress');
-  if (hideProgCb) state.hideProgress = hideProgCb.checked;
-
   try {
     await grist.setOption('validators', state.validators);
     await grist.setOption('uniqueGroups', state.uniqueGroups || []);
@@ -3190,7 +2956,6 @@ async function saveConfig() {
     await grist.setOption('docUrl',            state.docUrl);
     await grist.setOption('showValidationFields',  !!state.showValidationFields);
     await grist.setOption('showConditionalFields', !!state.showConditionalFields);
-    await grist.setOption('hideProgress',          !!state.hideProgress);
 
     // Recharge le schéma pour que les refOptions reflètent les nouveaux filtres.
     // Le fieldOrder est ré-appliqué automatiquement en fin de loadSchema.
@@ -3229,9 +2994,9 @@ function escapePyStr(s) {
 }
 
 const PY_PRESETS = {
-  email: { pattern: '^[^\\s@]+@[^\\s@]+\\.[^\\s@]+, msg: 'adresse e-mail invalide' },
-  phone: { pattern: '^[\\d\\s+().\\-]{6,},          msg: 'numéro de téléphone invalide' },
-  url:   { pattern: '^https?://[^\\s]+,             msg: 'URL invalide' },
+  email: { pattern: '^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$', msg: 'adresse e-mail invalide' },
+  phone: { pattern: '^[\\d\\s+().\\-]{6,}$',          msg: 'numéro de téléphone invalide' },
+  url:   { pattern: '^https?://[^\\s]+$',             msg: 'URL invalide' },
 };
 
 function generateValidationFormula() {
@@ -3242,7 +3007,7 @@ function generateValidationFormula() {
     const ovr = state.validators[col.colId];
     if (!ovr || Object.keys(ovr).length === 0) continue;
 
-    const ref  = `${col.colId}`;
+    const ref  = `$${col.colId}`;
     const lbl  = escapePyStr(col.label || col.colId);
     const base = baseTypeOf(col.type);
     const customMsg = ovr.errorMsg ? escapePyStr(ovr.errorMsg) : null;
@@ -3455,9 +3220,6 @@ async function bootGrist() {
     state.standaloneTitle      = (opts && opts.standaloneTitle)   || 'Formulaire';
     state.standaloneSuccess    = (opts && opts.standaloneSuccess) || 'Merci, votre réponse a été enregistrée.';
     state.docUrl               = (opts && opts.docUrl) || null;
-    // Clé absente dans les configs enregistrées avant cette option : barre
-    // affichée, soit le comportement d'avant.
-    state.hideProgress         = !!(opts && opts.hideProgress);
 
     // Affichage des sections avancées : préférence explicite > auto-détection sur la config existante
     if (opts && 'showValidationFields' in opts) {
@@ -3508,8 +3270,6 @@ async function bootStandalone() {
     applyFieldOrder();
     state.standaloneTitle    = cfg.title || 'Formulaire';
     state.standaloneSuccess  = cfg.successMessage || 'Merci, votre réponse a été enregistrée.';
-    // Clé absente dans les liens générés avant cette option : barre affichée.
-    state.hideProgress       = !!cfg.hideProgress;
 
     const parsed = parseGristDocUrl(cfg.docUrl || '');
     if (!parsed) throw new Error("URL Grist invalide dans le lien");
